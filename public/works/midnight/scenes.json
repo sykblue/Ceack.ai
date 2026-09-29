@@ -1,0 +1,12 @@
+[
+  {
+    "enabled": true,
+    "keywords": [
+      "책을 펼친다",
+      "책을 펼쳐",
+      "책을 연다"
+    ],
+    "image": "images/book.svg",
+    "caption": "이름 없는 책의 첫 페이지"
+  }
+]

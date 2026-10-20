@@ -45,6 +45,19 @@ npm run dev
 
 `npm run build`로 배포용 `dist`를 만듭니다. 배포 후에는 JSON과 이미지를 수정하고 다시 배포해야 합니다. 코드 작성 없이 웹에서 수정하는 관리자 화면은 현재 포함되어 있지 않습니다.
 
+## Ollama(내 컴퓨터 AI)로 채팅하기
+
+기본 설정은 내 컴퓨터에서 도는 Ollama입니다. API 키가 필요 없고 대화가 외부로 나가지 않습니다.
+
+1. Ollama를 설치하고(`irm https://ollama.com/install.ps1 | iex`) `ollama pull qwen2.5:14b`로 모델을 받습니다.
+2. `.env.example`을 `.env`로 복사합니다. `AI_PROVIDER=ollama`, `OLLAMA_MODEL=qwen2.5:14b`가 기본값입니다.
+3. `npm run dev`를 실행하고 `http://127.0.0.1:5187/`을 엽니다.
+
+- 다른 모델은 `ollama list`에 보이는 이름을 `OLLAMA_MODEL`에 적고 서버를 재시작합니다. 한국어는 qwen2.5 계열을 권장합니다.
+- 컴퓨터 성능에 따라 답변에 수십 초가 걸릴 수 있고, 첫 메시지는 모델을 불러오느라 더 느립니다. 최대 약 3분까지 기다립니다.
+- 화면의 '대화 준비됨'은 Ollama가 켜져 있고 설정한 모델이 설치되어 있다는 뜻입니다.
+- Gemini를 쓰려면 `.env`에서 `AI_PROVIDER=gemini`로 바꾸고 아래 설정을 따릅니다.
+
 ## Gemini 채팅 실행 (추가됨)
 
 Node.js 22 이상이 필요합니다. 채팅 화면과 로컬 API 서버를 함께 실행합니다.

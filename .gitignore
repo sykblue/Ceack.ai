@@ -4,3 +4,5 @@ dist/
 .env.*
 !.env.example
 .DS_Store
+# AI가 그린 장면 그림
+public/works/*/images/gen-*

@@ -1,8 +1,10 @@
 import {createServer} from 'node:http';
-import {readFile} from 'node:fs/promises';
+import {readFile, writeFile} from 'node:fs/promises';
+import {randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {matchScene} from '../shared/scenes.js';
+import {checkComfy, drawScene} from './images.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 export class ChatError extends Error {
@@ -59,12 +61,12 @@ async function askGemini(system, messages, {apiKey, model, fetchImpl, signal}) {
   return {reply, truncated: candidate?.finishReason === 'MAX_TOKENS'};
 }
 // Local Ollama (https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion)
-async function askOllama(system, messages, {model, ollamaHost, fetchImpl, signal}) {
+async function askOllama(system, messages, {model, ollamaHost, fetchImpl, signal, keepAlive, options}) {
   let response;
   try {
     response = await fetchImpl(`${ollamaHost.replace(/\/+$/, '')}/api/chat`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({model, stream: false, messages: [{role: 'system', content: system}, ...messages.map(m => ({role: m.role === 'model' ? 'assistant' : 'user', content: m.text}))], options: {temperature: 0.85, num_predict: 2048, num_ctx: 8192}}),
+      body: JSON.stringify({model, stream: false, messages: [{role: 'system', content: system}, ...messages.map(m => ({role: m.role === 'model' ? 'assistant' : 'user', content: m.text}))], options: {temperature: 0.85, num_predict: 2048, num_ctx: 8192, ...options}, ...(keepAlive === undefined ? {} : {keep_alive: keepAlive})}),
       signal,
     });
   } catch (error) {
@@ -88,6 +90,30 @@ export async function generateReply({storyId, messages}, {provider = 'gemini', a
   if (!reply) throw new ChatError(502, '빈 답변이 도착했습니다. 다시 시도해 주세요.');
   return {reply, truncated, scene};
 }
+const IMAGE_TAGS_PROMPT = [
+  'You write prompts for an Illustrious (Danbooru-tag) anime image model.',
+  'Read the Korean story scene and output ONLY one line of 15-30 comma-separated English Danbooru tags.',
+  'Cover: number of characters (1girl, 1boy, solo...), hair and eye color, clothing, pose and action, expression, location, lighting, time of day, mood.',
+  'No sentences, no character names, no Korean, no explicit or sexual content.',
+].join('\n');
+export function cleanTags(text) {
+  return text.toLowerCase().replace(/<think>[\s\S]*?<\/think>/g, '').replace(/[^a-z0-9 ,_().'-]/g, ' ').replace(/\s+/g, ' ').split(',').map(t => t.trim()).filter(Boolean).slice(0, 40).join(', ').slice(0, 600);
+}
+// Turns a story reply into image tags, then has ComfyUI draw it into the work's images folder.
+export async function generateSceneImage({storyId, text}, {provider = 'gemini', apiKey, model, ollamaHost = 'http://127.0.0.1:11434', comfyHost, checkpoint, worksDir = path.join(root, 'public/works'), fetchImpl = fetch, signal}) {
+  const {story} = await readStory(storyId);
+  const scene = [{role: 'user', text: `작품 분위기: ${story.description}\n\n장면:\n${text}`}];
+  // keep_alive 0 frees the GPU for the image model right after the tags are written.
+  const {reply} = provider === 'ollama' ? await askOllama(IMAGE_TAGS_PROMPT, scene, {model, ollamaHost, fetchImpl, signal, keepAlive: 0, options: {temperature: 0.4, num_predict: 200}}) : await askGemini(IMAGE_TAGS_PROMPT, scene, {apiKey, model, fetchImpl, signal});
+  const tags = cleanTags(reply || '');
+  if (!tags) throw new ChatError(502, '장면 설명을 만들지 못했습니다.');
+  let png;
+  try { png = await drawScene({comfyHost, checkpoint, positive: `masterpiece, best quality, amazing quality, flat color, anime screenshot, ${tags}`, fetchImpl, signal}); }
+  catch (error) { if (error.comfy) throw new ChatError(502, error.message); throw error; }
+  const file = `gen-${Date.now()}-${randomBytes(3).toString('hex')}.png`;
+  await writeFile(path.join(worksDir, storyId, 'images', file), png);
+  return {scene: {image: `images/${file}`, caption: 'AI가 그린 장면'}};
+}
 export async function checkOllama({model, ollamaHost, fetchImpl = fetch}) {
   try {
     const response = await fetchImpl(`${ollamaHost.replace(/\/+$/, '')}/api/tags`, {signal: AbortSignal.timeout(3000)});
@@ -103,21 +129,29 @@ async function readBody(req) {
   for await (const chunk of req) { text += chunk; if (Buffer.byteLength(text) > 256000) throw new ChatError(413, '요청이 너무 큽니다.'); }
   try { return JSON.parse(text); } catch { throw new ChatError(400, '올바른 JSON 요청이 필요합니다.'); }
 }
-export function createApp({provider = 'gemini', apiKey = '', model = provider === 'ollama' ? 'qwen2.5:14b' : 'gemini-3.8-flash', ollamaHost = 'http://127.0.0.1:11434', fetchImpl = fetch} = {}) {
+export function createApp({provider = 'gemini', apiKey = '', model = provider === 'ollama' ? 'qwen2.5:14b' : 'gemini-3.8-flash', ollamaHost = 'http://127.0.0.1:11434', comfyHost = '', checkpoint = '', worksDir, fetchImpl = fetch} = {}) {
   const rate = new Map();
   return createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
-    if (pathname === '/api/health' && req.method === 'GET') return json(res, 200, {provider, model, configured: provider === 'ollama' ? await checkOllama({model, ollamaHost, fetchImpl}) : Boolean(apiKey.trim())});
-    if (pathname !== '/api/chat' || req.method !== 'POST') return json(res, 404, {error:'요청한 API가 없습니다.'});
+    if (pathname === '/api/health' && req.method === 'GET') return json(res, 200, {provider, model, configured: provider === 'ollama' ? await checkOllama({model, ollamaHost, fetchImpl}) : Boolean(apiKey.trim()), images: Boolean(comfyHost && checkpoint) && await checkComfy({comfyHost, checkpoint, fetchImpl})});
+    if (!['/api/chat', '/api/scene-image'].includes(pathname) || req.method !== 'POST') return json(res, 404, {error:'요청한 API가 없습니다.'});
     const controller = new AbortController();
-    // Local models can take a while to load into memory on the first message.
-    const timeout = setTimeout(() => controller.abort(), provider === 'ollama' ? 170000 : 60000);
+    // Local models can take a while to load into memory on the first message; drawing needs extra time.
+    const timeout = setTimeout(() => controller.abort(), pathname === '/api/scene-image' ? 290000 : provider === 'ollama' ? 170000 : 60000);
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
       // Local development API: do not accept cross-site browser requests.
       if (req.headers.origin && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.origin)) throw new ChatError(403, '허용되지 않은 출처입니다.');
       if (!req.headers['content-type']?.startsWith('application/json')) throw new ChatError(415, 'JSON 형식으로 요청해 주세요.');
-      const input = validateChat(await readBody(req));
+      const body = await readBody(req);
+      if (pathname === '/api/scene-image') {
+        if (!comfyHost || !checkpoint) throw new ChatError(503, '장면 그림 생성이 꺼져 있습니다. .env의 COMFYUI_CHECKPOINT를 확인해 주세요.');
+        if (!body || typeof body.storyId !== 'string' || !/^[a-z0-9-]{1,60}$/.test(body.storyId) || typeof body.text !== 'string' || !body.text.trim() || body.text.length > 12000) throw new ChatError(400, '장면 내용이 올바르지 않습니다.');
+        const result = await generateSceneImage({storyId: body.storyId, text: body.text.trim()}, {provider, apiKey, model, ollamaHost, comfyHost, checkpoint, worksDir, fetchImpl, signal: controller.signal});
+        if (!res.destroyed) json(res, 200, result);
+        return;
+      }
+      const input = validateChat(body);
       if (provider !== 'ollama' && !apiKey.trim()) throw new ChatError(503, 'Gemini API 키가 아직 설정되지 않았습니다. 프로젝트 .env에 GEMINI_API_KEY를 입력하고 서버를 재시작해 주세요.');
       const now = Date.now(), ip = req.socket.remoteAddress;
       for (const [key, value] of rate) if (now - value.start >= 60000) rate.delete(key);

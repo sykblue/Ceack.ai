@@ -58,6 +58,19 @@ npm run dev
 - 화면의 '대화 준비됨'은 Ollama가 켜져 있고 설정한 모델이 설치되어 있다는 뜻입니다.
 - Gemini를 쓰려면 `.env`에서 `AI_PROVIDER=gemini`로 바꾸고 아래 설정을 따릅니다.
 
+## AI가 장면 그림 그리기 (ComfyUI + Flanime)
+
+키워드 장면이 없는 답변이면, 답변이 끝난 뒤 내 컴퓨터의 ComfyUI가 그 장면을 그려 메시지 아래에 붙입니다.
+
+1. ComfyUI 포터블(Windows NVIDIA)을 설치하고 `run_nvidia_gpu.bat`으로 실행합니다. 주소는 `http://127.0.0.1:8188`입니다.
+2. Civitai에서 Flanime(Illustrious) 체크포인트를 받아 `ComfyUI/models/checkpoints/`에 넣습니다.
+3. `.env`의 `COMFYUI_CHECKPOINT`에 그 파일 이름을 적고 `npm run dev`를 다시 실행합니다. 비워 두면 그림 생성이 꺼집니다.
+
+- 흐름: 답변 → Ollama가 장면을 영어 태그로 바꿈 → ComfyUI가 1216×832로 그림 → `public/works/<작품>/images/gen-*.png`에 저장(Git 제외).
+- 태그를 만든 뒤 Ollama 모델을 메모리에서 내려 GPU를 그림 모델에 넘깁니다. 그래서 그림을 그린 다음 메시지는 모델을 다시 불러오느라 조금 느립니다.
+- 그림 한 장에 보통 30초~1분(8GB GPU 기준) 걸리며, 그리는 동안에도 대화는 계속할 수 있습니다.
+- `scenes.json` 키워드가 맞으면 그 사진이 우선이고 새로 그리지 않습니다.
+
 ## Gemini 채팅 실행 (추가됨)
 
 Node.js 22 이상이 필요합니다. 채팅 화면과 로컬 API 서버를 함께 실행합니다.

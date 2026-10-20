@@ -78,8 +78,53 @@ test('HTTP: Ollama health reports whether the model is installed, chat needs no 
   await new Promise(resolve=>app.listen(0,'127.0.0.1',resolve));
   const url=`http://127.0.0.1:${app.address().port}`;
   try{
-   const health=await(await fetch(url+'/api/health?t=1')).json();assert.deepEqual(health,{provider:'ollama',model:'qwen2.5:14b',configured:installed});
+   const health=await(await fetch(url+'/api/health?t=1')).json();assert.deepEqual(health,{provider:'ollama',model:'qwen2.5:14b',configured:installed,images:false});
    const result=await fetch(url+'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)});assert.equal(result.status,200);assert.equal((await result.json()).reply,'안녕');
   }finally{app.closeAllConnections();await new Promise(resolve=>app.close(resolve));}
+ }
+});
+
+import {generateSceneImage, cleanTags} from './app.js';
+import {sceneWorkflow} from './images.js';
+import {mkdtemp, mkdir, readFile as readTestFile, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+test('scene tags are reduced to safe comma-separated English',()=>{
+ assert.equal(cleanTags('<think>x</think>1girl, Long Hair,\n 별, night sky <b>'),'1girl, long hair, night sky b');
+});
+test('scene workflow uses the checkpoint with clip skip 2 and the given prompt',()=>{
+ const w=sceneWorkflow({checkpoint:'flanime.safetensors',positive:'1girl',seed:7});
+ assert.equal(w[1].inputs.ckpt_name,'flanime.safetensors');assert.equal(w[2].inputs.stop_at_clip_layer,-2);
+ assert.equal(w[3].inputs.text,'1girl');assert.equal(w[6].inputs.seed,7);assert.equal(w[6].inputs.sampler_name,'euler_ancestral');
+});
+test('scene image: Ollama writes tags and unloads, ComfyUI draws, PNG saved under the work images folder',async()=>{
+ const worksDir=await mkdtemp(join(tmpdir(),'ceack-'));await mkdir(join(worksDir,'lumina','images'),{recursive:true});
+ const calls=[];
+ const fetchImpl=async(url,options={})=>{calls.push({url,body:options.body&&JSON.parse(options.body)});
+  if(url.endsWith('/api/chat'))return response({message:{content:'1girl, night, observatory'},done_reason:'stop'});
+  if(url.endsWith('/prompt'))return response({prompt_id:'p1'});
+  if(url.endsWith('/history/p1'))return response(calls.filter(c=>c.url.endsWith('/history/p1')).length<2?{}:{p1:{outputs:{8:{images:[{filename:'ceack_001.png',subfolder:'',type:'output'}]}}}});
+  if(url.includes('/view?'))return new Response(new Uint8Array([137,80,78,71]));
+  throw Error('unexpected '+url)};
+ try{
+  const {scene}=await generateSceneImage({storyId:'lumina',text:'천문탑 안은 별빛으로 가득했다.'},{provider:'ollama',model:'qwen2.5:14b',comfyHost:'http://127.0.0.1:8188',checkpoint:'flanime.safetensors',worksDir,fetchImpl});
+  assert.match(scene.image,/^images\/gen-\d+-[0-9a-f]{6}\.png$/);assert.ok(isSceneImage(scene));
+  assert.deepEqual([...await readTestFile(join(worksDir,'lumina',scene.image))],[137,80,78,71]);
+  assert.equal(calls[0].body.keep_alive,0);
+  assert.match(calls[1].body.prompt[3].inputs.text,/flat color.*1girl, night, observatory/);
+  assert.ok(calls.some(c=>c.url.includes('filename=ceack_001.png')));
+ }finally{await rm(worksDir,{recursive:true,force:true})}
+});
+test('scene image: ComfyUI not running gives a clear 502',async()=>{
+ const fetchImpl=async url=>{if(url.endsWith('/api/chat'))return response({message:{content:'1girl'}});throw new TypeError('fetch failed')};
+ await assert.rejects(generateSceneImage({storyId:'lumina',text:'장면'},{provider:'ollama',model:'m',comfyHost:'http://127.0.0.1:8188',checkpoint:'c',fetchImpl}),e=>e.status===502&&e.message.includes('ComfyUI'));
+});
+test('HTTP: health reports images only when ComfyUI has the checkpoint',async()=>{
+ const fetchImpl=async url=>url.endsWith('/api/tags')?response({models:[{name:'qwen2.5:14b'}]}):response({CheckpointLoaderSimple:{input:{required:{ckpt_name:[['flanime.safetensors']]}}}});
+ for(const [checkpoint,expected] of [['flanime.safetensors',true],['missing.safetensors',false],['',false]]){
+  const app=createApp({provider:'ollama',model:'qwen2.5:14b',comfyHost:'http://127.0.0.1:8188',checkpoint,fetchImpl});
+  await new Promise(resolve=>app.listen(0,'127.0.0.1',resolve));
+  try{assert.equal((await(await fetch(`http://127.0.0.1:${app.address().port}/api/health`)).json()).images,expected)}
+  finally{app.closeAllConnections();await new Promise(resolve=>app.close(resolve));}
  }
 });
